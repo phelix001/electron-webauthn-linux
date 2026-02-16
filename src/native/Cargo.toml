@@ -1,0 +1,28 @@
+[package]
+name = "webauthn-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["async", "napi6", "serde-json"] }
+napi-derive = "2"
+passkey-authenticator = { version = "0.5", features = ["tokio"] }
+passkey-client = "0.5"
+passkey-types = "0.5"
+async-trait = "0.1"
+public-suffix = "0.1"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+coset = "0.4"
+base64 = "0.22"
+url = "2"
+thiserror = "2"
+
+[build-dependencies]
+napi-build = "2"

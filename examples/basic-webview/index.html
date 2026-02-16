@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>electron-webauthn-linux example</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; }
+    header { padding: 12px 20px; background: #16213e; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 16px; margin: 0; }
+    header input {
+      flex: 1; padding: 6px 12px; border-radius: 6px; border: 1px solid #444;
+      background: #0f3460; color: #eee; font-size: 14px;
+    }
+    header button {
+      padding: 6px 16px; border-radius: 6px; border: none;
+      background: #e94560; color: #fff; cursor: pointer; font-size: 14px;
+    }
+    webview { width: 100%; height: calc(100vh - 48px); border: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>WebAuthn Demo</h1>
+    <input id="url" value="https://webauthn.io/" />
+    <button onclick="navigate()">Go</button>
+  </header>
+  <webview id="wv" src="https://webauthn.io/" allowpopups></webview>
+  <script>
+    function navigate() {
+      document.getElementById('wv').src = document.getElementById('url').value;
+    }
+    document.getElementById('url').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') navigate();
+    });
+  </script>
+</body>
+</html>
