@@ -90,3 +90,34 @@ export function teardownWebAuthn(): void {
 export function getAuthenticatorManager(): AuthenticatorManager | null {
   return manager;
 }
+
+/**
+ * Check if there are stored credentials, optionally for a specific rpId.
+ * If no rpId is provided, checks if there are credentials for ANY site.
+ * Returns false if setupWebAuthn() hasn't been called.
+ *
+ * Use this in the main process to decide whether to inject the WebAuthn
+ * page script into webviews. When the store is empty, skip injection so
+ * sites use their normal sign-in flow without dead-end passkey prompts.
+ */
+export async function hasStoredCredentials(rpId?: string): Promise<boolean> {
+  if (!manager) return false;
+  try {
+    const backends = await manager.getAvailableBackendsForGet(rpId || '');
+    if (backends.length > 0) return true;
+    // If no rpId specified, also check if the software backend has ANY creds
+    if (!rpId) {
+      const allBackends = await manager.getAvailableBackendsForCreate();
+      for (const b of allBackends) {
+        // hasCredentials('') should check all rpIds for software backend
+        if (b.type === 'software') {
+          const has = await b.hasCredentials('');
+          if (has) return true;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
