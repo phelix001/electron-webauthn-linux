@@ -195,6 +195,25 @@ export const webauthnPageScript = `
         throw new DOMException('Not supported', 'NotSupportedError');
       }
 
+      // Check if we have any stored credentials for this site.
+      // If not, reject immediately so the site skips to password/other methods.
+      // Do NOT fall through to the original handler - on Electron Linux it hangs
+      // (Chromium shows its own passkey UI that never completes).
+      var rpId = options.publicKey.rpId || window.location.hostname;
+      if (window.electronWebAuthn.hasCredentials) {
+        try {
+          var hasCreds = await window.electronWebAuthn.hasCredentials(rpId);
+          if (!hasCreds) {
+            console.log('[electron-webauthn-linux] No stored credentials for ' + rpId + ', rejecting immediately');
+            throw new DOMException('No credentials available for this site.', 'NotAllowedError');
+          }
+        } catch (checkErr) {
+          if (checkErr instanceof DOMException) throw checkErr;
+          console.warn('[electron-webauthn-linux] hasCredentials check failed:', checkErr?.message);
+          throw new DOMException('No credentials available for this site.', 'NotAllowedError');
+        }
+      }
+
       try {
         var serialized = serializeCredentialRequestOptions(options);
         var result = await window.electronWebAuthn.get(serialized);
@@ -217,7 +236,11 @@ export const webauthnPageScript = `
     };
   }
 
-  // Also patch PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable
+  // Always report platform authenticator as available.
+  // This is needed for sites to offer passkey creation, and some sites
+  // (like Google) use it as a security signal - returning false can trigger
+  // "browser not secure" errors. The hasCredentials check in credentials.get()
+  // handles the case where there are no stored credentials.
   if (typeof PublicKeyCredential !== 'undefined') {
     PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = async function() {
       return true;

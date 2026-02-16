@@ -119,6 +119,14 @@ export function registerWebAuthnHandlers(manager: AuthenticatorManager): void {
       return manager.getAssertion(options, selectedBackend);
     },
   );
+
+  ipcMain.handle(
+    'webauthn:hasCredentials',
+    async (_event, rpId: string) => {
+      const backends = await manager.getAvailableBackendsForGet(rpId);
+      return backends.length > 0;
+    },
+  );
 }
 
 /**
@@ -127,4 +135,5 @@ export function registerWebAuthnHandlers(manager: AuthenticatorManager): void {
 export function removeWebAuthnHandlers(): void {
   ipcMain.removeHandler('webauthn:create');
   ipcMain.removeHandler('webauthn:get');
+  ipcMain.removeHandler('webauthn:hasCredentials');
 }
