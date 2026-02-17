@@ -17,8 +17,52 @@ export const webauthnPageScript = `
 (function() {
   'use strict';
 
-  // Only patch if we're on Linux and the electronWebAuthn bridge exists
-  if (!window.electronWebAuthn) return;
+  // Set up the WebAuthn IPC bridge.
+  // Priority 1: contextBridge from webview preload (window.electronWebAuthn)
+  // Priority 2: CDP Runtime.addBinding from main process (__webauthnBridge)
+  var webauthnBridge;
+  if (window.electronWebAuthn) {
+    webauthnBridge = window.electronWebAuthn;
+  } else if (typeof __webauthnBridge !== 'undefined') {
+    // CDP binding bridge for popup windows that lack a preload script.
+    // __webauthnBridge is created by Runtime.addBinding in the main process.
+    var __pending = {};
+    var __counter = 0;
+    window.__webauthnCallback = function(responseJson) {
+      try {
+        var response = JSON.parse(responseJson);
+        var entry = __pending[response.id];
+        if (entry) {
+          delete __pending[response.id];
+          if (response.error) entry.reject(new Error(response.error));
+          else entry.resolve(response.result);
+        }
+      } catch (e) {
+        console.error('[electron-webauthn-linux] CDP callback parse error:', e);
+      }
+    };
+    function cdpBridgeCall(method, arg) {
+      return new Promise(function(resolve, reject) {
+        var id = String(++__counter);
+        __pending[id] = { resolve: resolve, reject: reject };
+        try {
+          __webauthnBridge(JSON.stringify({ id: id, method: method, arg: arg }));
+        } catch (e) {
+          delete __pending[id];
+          reject(e);
+        }
+      });
+    }
+    webauthnBridge = {
+      create: function(options) { return cdpBridgeCall('create', options); },
+      get: function(options) { return cdpBridgeCall('get', options); },
+      hasCredentials: function(rpId) { return cdpBridgeCall('hasCredentials', rpId); },
+    };
+    console.log('[electron-webauthn-linux] Using CDP bridge for popup window');
+  } else {
+    // No bridge available - can't patch WebAuthn
+    return;
+  }
 
   // Save originals (they're stubs on Electron Linux anyway)
   const originalCreate = navigator.credentials?.create?.bind(navigator.credentials);
@@ -167,9 +211,11 @@ export const webauthnPageScript = `
         throw new DOMException('Not supported', 'NotSupportedError');
       }
 
+      console.log('[electron-webauthn-linux] credentials.create called for rp:', options.publicKey.rp?.id || options.publicKey.rp?.name || 'unknown');
+
       try {
         var serialized = serializeCredentialCreationOptions(options);
-        var result = await window.electronWebAuthn.create(serialized);
+        var result = await webauthnBridge.create(serialized);
         return reconstructCreateResponse(result);
       } catch (err) {
         // Map to proper DOMException using case-insensitive matching
@@ -195,14 +241,16 @@ export const webauthnPageScript = `
         throw new DOMException('Not supported', 'NotSupportedError');
       }
 
+      console.log('[electron-webauthn-linux] credentials.get called for rpId:', options.publicKey.rpId || window.location.hostname, 'allowCredentials:', (options.publicKey.allowCredentials || []).length);
+
       // Check if we have any stored credentials for this site.
       // If not, reject immediately so the site skips to password/other methods.
       // Do NOT fall through to the original handler - on Electron Linux it hangs
       // (Chromium shows its own passkey UI that never completes).
       var rpId = options.publicKey.rpId || window.location.hostname;
-      if (window.electronWebAuthn.hasCredentials) {
+      if (webauthnBridge.hasCredentials) {
         try {
-          var hasCreds = await window.electronWebAuthn.hasCredentials(rpId);
+          var hasCreds = await webauthnBridge.hasCredentials(rpId);
           if (!hasCreds) {
             console.log('[electron-webauthn-linux] No stored credentials for ' + rpId + ', rejecting immediately');
             throw new DOMException('No credentials available for this site.', 'NotAllowedError');
@@ -216,7 +264,7 @@ export const webauthnPageScript = `
 
       try {
         var serialized = serializeCredentialRequestOptions(options);
-        var result = await window.electronWebAuthn.get(serialized);
+        var result = await webauthnBridge.get(serialized);
         return reconstructGetResponse(result);
       } catch (err) {
         // Map to proper DOMException using case-insensitive matching
@@ -251,6 +299,86 @@ export const webauthnPageScript = `
       PublicKeyCredential.isConditionalMediationAvailable = async function() {
         return false; // We don't support conditional UI yet
       };
+    }
+  }
+
+  // Patch navigator.userAgentData to include "Google Chrome" brand.
+  // Google's passkey settings page checks userAgentData.brands to determine
+  // if the browser supports passkey creation. Electron/Chromium only reports
+  // "Chromium" brand, not "Google Chrome", causing Google to reject creation.
+  if (typeof navigator !== 'undefined' && navigator.userAgentData) {
+    try {
+      var origUAData = navigator.userAgentData;
+      var chromiumBrand = null;
+      var brands = origUAData.brands || [];
+      for (var i = 0; i < brands.length; i++) {
+        if (brands[i].brand === 'Chromium') {
+          chromiumBrand = brands[i];
+          break;
+        }
+      }
+      var chromeVersion = chromiumBrand ? chromiumBrand.version : '138';
+
+      // Add "Google Chrome" brand if not already present
+      var hasChrome = false;
+      for (var i = 0; i < brands.length; i++) {
+        if (brands[i].brand === 'Google Chrome') {
+          hasChrome = true;
+          break;
+        }
+      }
+
+      if (!hasChrome) {
+        var newBrands = brands.slice();
+        newBrands.push({ brand: 'Google Chrome', version: chromeVersion });
+
+        var patchedUAData = {
+          brands: newBrands,
+          mobile: origUAData.mobile,
+          platform: origUAData.platform,
+          toJSON: function() {
+            return { brands: newBrands, mobile: origUAData.mobile, platform: origUAData.platform };
+          },
+          getHighEntropyValues: function(hints) {
+            return origUAData.getHighEntropyValues(hints).then(function(values) {
+              // Patch fullVersionList to include Google Chrome
+              if (values.fullVersionList) {
+                var hasFullChrome = false;
+                for (var j = 0; j < values.fullVersionList.length; j++) {
+                  if (values.fullVersionList[j].brand === 'Google Chrome') {
+                    hasFullChrome = true;
+                    break;
+                  }
+                }
+                if (!hasFullChrome) {
+                  var fullChromeVer = chromeVersion;
+                  for (var j = 0; j < values.fullVersionList.length; j++) {
+                    if (values.fullVersionList[j].brand === 'Chromium') {
+                      fullChromeVer = values.fullVersionList[j].version;
+                      break;
+                    }
+                  }
+                  values.fullVersionList.push({ brand: 'Google Chrome', version: fullChromeVer });
+                }
+              }
+              return values;
+            });
+          },
+        };
+
+        // Set the prototype to match NavigatorUAData if available
+        if (typeof NavigatorUAData !== 'undefined') {
+          Object.setPrototypeOf(patchedUAData, NavigatorUAData.prototype);
+        }
+
+        Object.defineProperty(navigator, 'userAgentData', {
+          get: function() { return patchedUAData; },
+          configurable: true,
+        });
+        console.log('[electron-webauthn-linux] Patched navigator.userAgentData brands:', JSON.stringify(newBrands));
+      }
+    } catch (uaErr) {
+      console.warn('[electron-webauthn-linux] Failed to patch userAgentData:', uaErr?.message);
     }
   }
 
