@@ -400,6 +400,7 @@ export function setupWebAuthnBridge(): void {
   contextBridge.exposeInMainWorld('electronWebAuthn', {
     create: (options: any) => ipcRenderer.invoke('webauthn:create', options),
     get: (options: any) => ipcRenderer.invoke('webauthn:get', options),
+    hasCredentials: (rpId: string) => ipcRenderer.invoke('webauthn:hasCredentials', rpId),
   });
 }
 
