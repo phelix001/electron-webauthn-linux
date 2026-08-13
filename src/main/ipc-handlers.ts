@@ -5,8 +5,58 @@
 
 import { ipcMain, BrowserWindow } from 'electron';
 import type { AuthenticatorManager } from './authenticator-manager';
-import type { CreateOptions, GetOptions } from '../authenticators/types';
-import { showAuthenticatorDialog } from './dialog';
+import type { AuthenticatorBackend, CreateOptions, GetOptions } from '../authenticators/types';
+import { showAuthenticatorDialog, showHardwareKeyDialog } from './dialog';
+
+function createRequiresHardwarePin(options: CreateOptions): boolean {
+  return (
+    options.authenticatorSelection?.residentKey === 'required' ||
+    options.authenticatorSelection?.userVerification === 'required' ||
+    options.authenticatorSelection?.userVerification === 'preferred'
+  );
+}
+
+function getRequiresHardwarePin(options: GetOptions): boolean {
+  return (
+    !options.allowCredentials ||
+    options.allowCredentials.length === 0 ||
+    options.userVerification === 'required' ||
+    options.userVerification === 'preferred'
+  );
+}
+
+async function withHardwareKeyDialog<T>(
+  parentWindow: BrowserWindow | null,
+  backend: AuthenticatorBackend,
+  operation: 'create' | 'get',
+  rpId: string,
+  requiresPin: boolean,
+  run: (
+    hardwareUserVerification: CreateOptions['hardwareUserVerification'],
+    hardwareAbortSignal: AbortSignal | undefined,
+  ) => Promise<T>,
+): Promise<T> {
+  if (backend.type !== 'hardware') {
+    return run(undefined, undefined);
+  }
+
+  const dialog = showHardwareKeyDialog(parentWindow, operation, rpId, requiresPin);
+
+  try {
+    return await run(
+      async (request) => {
+        const pin = await dialog.getPin(request.previousError);
+        if (pin === null) {
+          throw new Error('NotAllowed: The operation was cancelled.');
+        }
+        return pin ? { pin } : {};
+      },
+      dialog.signal,
+    );
+  } finally {
+    dialog.close();
+  }
+}
 
 /**
  * Register WebAuthn IPC handlers on the main process.
@@ -46,7 +96,22 @@ export function registerWebAuthnHandlers(manager: AuthenticatorManager): void {
         selectedBackend = chosen;
       }
 
-      return manager.createCredential(options, selectedBackend);
+      const parentWindow = BrowserWindow.fromWebContents(event.sender);
+      return withHardwareKeyDialog(
+        parentWindow,
+        selectedBackend,
+        'create',
+        options.rpId,
+        createRequiresHardwarePin(options),
+        (hardwareUserVerification, hardwareAbortSignal) => manager.createCredential(
+          {
+            ...options,
+            hardwareUserVerification,
+            hardwareAbortSignal,
+          },
+          selectedBackend,
+        ),
+      );
     },
   );
 
@@ -98,7 +163,22 @@ export function registerWebAuthnHandlers(manager: AuthenticatorManager): void {
           selectedBackend = chosen;
         }
 
-        return manager.getAssertion(options, selectedBackend);
+        const parentWindow = BrowserWindow.fromWebContents(event.sender);
+        return withHardwareKeyDialog(
+          parentWindow,
+          selectedBackend,
+          'get',
+          options.rpId,
+          getRequiresHardwarePin(options),
+          (hardwareUserVerification, hardwareAbortSignal) => manager.getAssertion(
+            {
+              ...options,
+              hardwareUserVerification,
+              hardwareAbortSignal,
+            },
+            selectedBackend,
+          ),
+        );
       }
 
       // Show selection dialog if multiple backends have matching credentials
@@ -116,7 +196,22 @@ export function registerWebAuthnHandlers(manager: AuthenticatorManager): void {
         selectedBackend = chosen;
       }
 
-      return manager.getAssertion(options, selectedBackend);
+      const parentWindow = BrowserWindow.fromWebContents(event.sender);
+      return withHardwareKeyDialog(
+        parentWindow,
+        selectedBackend,
+        'get',
+        options.rpId,
+        getRequiresHardwarePin(options),
+        (hardwareUserVerification, hardwareAbortSignal) => manager.getAssertion(
+          {
+            ...options,
+            hardwareUserVerification,
+            hardwareAbortSignal,
+          },
+          selectedBackend,
+        ),
+      );
     },
   );
 

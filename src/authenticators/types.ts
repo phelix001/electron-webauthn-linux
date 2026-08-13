@@ -25,6 +25,21 @@ export interface AuthenticatorBackend {
   getAssertion(options: GetOptions): Promise<GetResult>;
 }
 
+export interface HardwareUserVerificationRequest {
+  operation: 'create' | 'get' | 'credential-management';
+  rpId: string;
+  reason: 'user-verification' | 'resident-credential';
+  previousError?: 'pin-invalid';
+}
+
+export interface HardwareUserVerificationResult {
+  pin?: string;
+}
+
+export type HardwareUserVerificationHandler = (
+  request: HardwareUserVerificationRequest,
+) => Promise<HardwareUserVerificationResult | null>;
+
 export interface CreateOptions {
   origin: string;
   rpId: string;
@@ -41,6 +56,8 @@ export interface CreateOptions {
     authenticatorAttachment?: string;
   };
   timeout?: number;
+  hardwareUserVerification?: HardwareUserVerificationHandler;
+  hardwareAbortSignal?: AbortSignal;
 }
 
 export interface GetOptions {
@@ -50,6 +67,8 @@ export interface GetOptions {
   allowCredentials?: Array<{ id: string; type: string }>;
   userVerification?: string;
   timeout?: number;
+  hardwareUserVerification?: HardwareUserVerificationHandler;
+  hardwareAbortSignal?: AbortSignal;
 }
 
 export interface CreateResult {
@@ -72,4 +91,5 @@ export interface GetResult {
   signature: string;
   userHandle: string | null;
   type: string;
+  authenticatorAttachment?: string;
 }
