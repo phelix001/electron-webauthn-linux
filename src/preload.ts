@@ -157,7 +157,7 @@ export const webauthnPageScript = `
       rawId: rawId,
       response: response,
       type: 'public-key',
-      authenticatorAttachment: 'platform',
+      authenticatorAttachment: result.authenticatorAttachment || 'platform',
       getClientExtensionResults: function() { return {}; },
     };
 
@@ -191,7 +191,7 @@ export const webauthnPageScript = `
       rawId: rawId,
       response: response,
       type: 'public-key',
-      authenticatorAttachment: 'platform',
+      authenticatorAttachment: result.authenticatorAttachment || 'platform',
       getClientExtensionResults: function() { return {}; },
     };
 
