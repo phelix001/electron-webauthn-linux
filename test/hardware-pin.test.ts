@@ -63,3 +63,30 @@ test('PIN needed but no provider configured fails closed', async () => {
   setPin(true);
   await expect(new HardwareKeyBackend().getAssertion(opts)).rejects.toThrow(/no PIN prompt/);
 });
+
+test('createCredential: base64 input, output parsed per fido2-cred(1), attestationObject is valid CBOR', async () => {
+  setPin(true);
+  const res = await new HardwareKeyBackend(async () => '1234').createCredential({
+    origin: 'https://example.com',
+    rpId: 'example.com',
+    rpName: 'x',
+    userId: base64urlEncode(Buffer.from('u1')),
+    userName: 'u',
+    userDisplayName: 'u',
+    challenge: base64urlEncode(Buffer.from('chal')),
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+    authenticatorSelection: { userVerification: 'required' },
+  });
+  expect(Buffer.from(res.credentialId, 'base64url').toString()).toBe('credid');
+  const att = Buffer.from(res.attestationObject, 'base64url');
+  expect(att[0]).toBe(0xa3); // map(3): fmt, attStmt, authData
+  expect(att.includes(Buffer.from('packed'))).toBe(true);
+  expect(Buffer.from(res.authenticatorData, 'base64url').length).toBe(37);
+});
+
+test('authenticator data with the wrong rpIdHash is rejected', async () => {
+  setPin(false);
+  await expect(
+    new HardwareKeyBackend().getAssertion({ ...opts, rpId: 'evil.example' }),
+  ).rejects.toThrow(/rpIdHash/);
+});
