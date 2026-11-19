@@ -10,11 +10,13 @@ import type {
   GetResult,
 } from '../authenticators/types';
 import { PasskeyRsBackend } from '../authenticators/passkey-rs';
-import { HardwareKeyBackend } from '../authenticators/hardware';
+import { HardwareKeyBackend, type PinProvider } from '../authenticators/hardware';
 
 export interface AuthenticatorManagerOptions {
   storagePath: string;
   enableHardwareKeys?: boolean;
+  /** Collects the FIDO2 PIN for hardware keys. Defaults to an Electron dialog. */
+  pinProvider?: PinProvider;
 }
 
 export class AuthenticatorManager {
@@ -34,7 +36,7 @@ export class AuthenticatorManager {
 
     // Optionally add hardware key backend
     if (this.options.enableHardwareKeys !== false) {
-      const hardwareBackend = new HardwareKeyBackend();
+      const hardwareBackend = new HardwareKeyBackend(this.options.pinProvider);
       if (await hardwareBackend.isAvailable()) {
         this.backends.push(hardwareBackend);
       }

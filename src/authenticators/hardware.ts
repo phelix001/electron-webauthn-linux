@@ -5,6 +5,9 @@
 
 import { execFile, spawn } from 'child_process';
 import { createHash } from 'crypto';
+import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { promisify } from 'util';
 
 import { base64urlDecode, base64urlEncode } from '../helpers/serialization';
@@ -19,15 +22,19 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
-/** Run a command with stdin input and return stdout. */
-function spawnWithInput(
+/**
+ * Run a command and return stdout. `stdin` carries only the PIN (or nothing).
+ * The process is detached (setsid) so it has no controlling tty: libfido2 tools
+ * use a tty for the PIN when one exists, otherwise stdin.
+ */
+function runTool(
   cmd: string,
   args: string[],
-  input: string,
+  stdin: string,
   timeout: number,
 ): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { timeout });
+    const proc = spawn(cmd, args, { timeout, detached: true });
     let stdout = '';
     let stderr = '';
 
@@ -44,10 +51,34 @@ function spawnWithInput(
 
     proc.on('error', reject);
 
-    proc.stdin.write(input);
+    proc.stdin.write(stdin);
     proc.stdin.end();
   });
 }
+
+/** Write the tool's input to a private temp file (-i), so stdin stays free for the PIN. */
+async function withInputFile<T>(input: string, fn: (path: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), 'webauthn-fido2-'));
+  try {
+    const file = join(dir, 'input');
+    await writeFile(file, input, { mode: 0o600 });
+    return await fn(file);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** True if a client PIN is set on the device (`options: ..., clientPin, ...`). */
+async function deviceHasPin(device: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('fido2-token', ['-I', device]);
+    return /^options:.*(^|[\s,:])clientPin(\s|,|$)/m.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+export type PinProvider = (rpId: string) => Promise<string | null>;
 
 async function commandExists(cmd: string): Promise<boolean> {
   try {
@@ -81,6 +112,32 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
   readonly type = 'hardware' as const;
 
   private toolsAvailable: boolean | null = null;
+
+  constructor(private pinProvider?: PinProvider) {}
+
+  /**
+   * Decide whether to pass -v and, if the key has a PIN, collect it.
+   * 'required' always asks for UV; 'preferred' only when a PIN is set.
+   */
+  private async resolveUv(
+    device: string,
+    rpId: string,
+    userVerification: string | undefined,
+  ): Promise<{ uv: boolean; pin: string }> {
+    if (userVerification !== 'required' && userVerification !== 'preferred') {
+      return { uv: false, pin: '' };
+    }
+    const hasPin = await deviceHasPin(device);
+    if (!hasPin) {
+      return { uv: userVerification === 'required', pin: '' };
+    }
+    if (!this.pinProvider) {
+      throw new Error('Security key requires a PIN but no PIN prompt is configured');
+    }
+    const pin = await this.pinProvider(rpId);
+    if (!pin) throw new Error('PIN entry cancelled');
+    return { uv: true, pin: pin + '\n' };
+  }
 
   async isAvailable(): Promise<boolean> {
     if (this.toolsAvailable !== null) return this.toolsAvailable;
@@ -141,21 +198,15 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
       args.push('-r');
     }
 
-    // Add user verification flag
-    if (
-      options.authenticatorSelection?.userVerification === 'required' ||
-      options.authenticatorSelection?.userVerification === 'preferred'
-    ) {
-      args.push('-v');
-    }
+    const { uv, pin } = await this.resolveUv(
+      device,
+      options.rpId,
+      options.authenticatorSelection?.userVerification,
+    );
+    if (uv) args.push('-v');
 
-    args.push(device);
-
-    const { stdout } = await spawnWithInput(
-      'fido2-cred',
-      args,
-      input,
-      (options.timeout || 60) * 1000,
+    const { stdout } = await withInputFile(input, (file) =>
+      runTool('fido2-cred', [...args, '-i', file, device], pin, (options.timeout || 60) * 1000),
     );
 
     // Parse fido2-cred output (base64-encoded lines):
@@ -218,20 +269,11 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
 
     const args = ['-G', '-h']; // -G = get assertion
 
-    if (
-      options.userVerification === 'required' ||
-      options.userVerification === 'preferred'
-    ) {
-      args.push('-v');
-    }
+    const { uv, pin } = await this.resolveUv(device, options.rpId, options.userVerification);
+    if (uv) args.push('-v');
 
-    args.push(device);
-
-    const { stdout } = await spawnWithInput(
-      'fido2-assert',
-      args,
-      input,
-      (options.timeout || 60) * 1000,
+    const { stdout } = await withInputFile(input, (file) =>
+      runTool('fido2-assert', [...args, '-i', file, device], pin, (options.timeout || 60) * 1000),
     );
 
     // Parse fido2-assert output (base64-encoded lines):
