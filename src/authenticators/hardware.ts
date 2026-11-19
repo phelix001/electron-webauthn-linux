@@ -107,6 +107,58 @@ async function discoverDevices(): Promise<string[]> {
   }
 }
 
+/**
+ * libfido2 prints authenticator data CBOR-wrapped (a CBOR byte string). Unwrap it
+ * and check the leading rpIdHash so a mis-parse fails loudly instead of yielding garbage.
+ */
+function unwrapAuthData(wrapped: Buffer, rpId: string): Buffer {
+  const major = wrapped[0] >> 5;
+  const info = wrapped[0] & 0x1f;
+  let offset: number;
+  let len: number;
+  if (major !== 2) throw new Error('Unexpected authenticator data encoding from fido2 tool');
+  if (info < 24) { len = info; offset = 1; }
+  else if (info === 24) { len = wrapped[1]; offset = 2; }
+  else if (info === 25) { len = wrapped.readUInt16BE(1); offset = 3; }
+  else throw new Error('Unexpected authenticator data length encoding from fido2 tool');
+  const raw = wrapped.subarray(offset, offset + len);
+  const expected = createHash('sha256').update(rpId).digest();
+  if (raw.length < 37 || !raw.subarray(0, 32).equals(expected)) {
+    throw new Error('Authenticator data rpIdHash does not match the relying party');
+  }
+  return raw;
+}
+
+/** Minimal CBOR encoder: text, byte strings, integers, arrays and string-keyed maps. */
+function cborEncode(v: unknown): Buffer {
+  const head = (major: number, n: number): Buffer => {
+    if (n < 24) return Buffer.from([(major << 5) | n]);
+    if (n < 256) return Buffer.from([(major << 5) | 24, n]);
+    if (n < 65536) return Buffer.from([(major << 5) | 25, n >> 8, n & 0xff]);
+    const b = Buffer.alloc(5);
+    b[0] = (major << 5) | 26;
+    b.writeUInt32BE(n, 1);
+    return b;
+  };
+  if (Buffer.isBuffer(v)) return Buffer.concat([head(2, v.length), v]);
+  if (typeof v === 'string') {
+    const b = Buffer.from(v, 'utf8');
+    return Buffer.concat([head(3, b.length), b]);
+  }
+  if (typeof v === 'number' && Number.isInteger(v)) {
+    return v >= 0 ? head(0, v) : head(1, -1 - v);
+  }
+  if (Array.isArray(v)) return Buffer.concat([head(4, v.length), ...v.map(cborEncode)]);
+  if (v && typeof v === 'object') {
+    const entries = Object.entries(v as Record<string, unknown>);
+    return Buffer.concat([
+      head(5, entries.length),
+      ...entries.flatMap(([k, val]) => [cborEncode(k), cborEncode(val)]),
+    ]);
+  }
+  throw new Error('cborEncode: unsupported value');
+}
+
 export class HardwareKeyBackend implements AuthenticatorBackend {
   readonly name = 'Hardware Security Key (FIDO2)';
   readonly type = 'hardware' as const;
@@ -178,20 +230,15 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
     );
     const clientDataHash = createHash('sha256').update(clientDataJSON).digest();
 
-    // Build fido2-cred input:
-    // Line 1: clientDataHash (hex)
-    // Line 2: relying party id
-    // Line 3: user name
-    // Line 4: user id (hex)
-    const userIdHex = Buffer.from(base64urlDecode(options.userId)).toString('hex');
+    // fido2-cred(1) INPUT FORMAT (-M): base64 client data hash, rp id, user name, base64 user id.
     const input = [
-      clientDataHash.toString('hex'),
+      clientDataHash.toString('base64'),
       options.rpId,
       options.userName,
-      userIdHex,
+      Buffer.from(base64urlDecode(options.userId)).toString('base64'),
     ].join('\n') + '\n';
 
-    const args = ['-M', '-h']; // -M = make credential, -h = hmac-secret (most keys support this)
+    const args = ['-M', '-h']; // -M = make credential, -h = hmac-secret
 
     // Add resident key flag if requested
     if (options.authenticatorSelection?.residentKey === 'required') {
@@ -209,26 +256,35 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
       runTool('fido2-cred', [...args, '-i', file, device], pin, (options.timeout || 60) * 1000),
     );
 
-    // Parse fido2-cred output (base64-encoded lines):
-    // Line 1: format (e.g., "packed")
-    // Line 2: authenticator data (base64)
-    // Line 3: CBOR attestation cert (base64)
-    // Line 4: CBOR attestation sig (base64)
-    // Line 5: credential id (base64, if -r flag used)
+    // fido2-cred(1) OUTPUT FORMAT: client data hash, rp id, format, CBOR authenticator data,
+    // credential id, attestation signature, attestation certificate (optional).
     const lines = stdout.trim().split('\n');
-    if (lines.length < 4) {
+    if (lines.length < 6) {
       throw new Error('Unexpected fido2-cred output format');
     }
 
-    const authData = Buffer.from(lines[1], 'base64');
-    const credId = lines.length >= 5
-      ? Buffer.from(lines[4], 'base64')
-      : authData.subarray(55, 55 + authData[53] * 256 + authData[54]); // Extract from authData
+    const fmt = lines[2];
+    const authData = unwrapAuthData(Buffer.from(lines[3], 'base64'), options.rpId);
+    const credId = Buffer.from(lines[4], 'base64');
+    const sig = Buffer.from(lines[5], 'base64');
+    const cert = lines[6] ? Buffer.from(lines[6], 'base64') : null;
+
+    // attStmt per WebAuthn attestation statement formats (packed / fido-u2f / none).
+    // shortcut: packed alg assumed ES256 (-7), as every shipping FIDO2 key signs with it; upgrade when a key reports otherwise.
+    let attStmt: Record<string, unknown> = {};
+    if (fmt === 'packed') {
+      attStmt = { alg: -7, sig, ...(cert ? { x5c: [cert] } : {}) };
+    } else if (fmt === 'fido-u2f') {
+      attStmt = { sig, ...(cert ? { x5c: [cert] } : {}) };
+    } else if (fmt !== 'none') {
+      throw new Error(`Unsupported attestation format from security key: ${fmt}`);
+    }
+    const attestationObject = cborEncode({ fmt, attStmt, authData });
 
     return {
       credentialId: base64urlEncode(credId),
       rawId: base64urlEncode(credId),
-      attestationObject: base64urlEncode(Buffer.from(lines.slice(1).join('\n'), 'base64')),
+      attestationObject: base64urlEncode(attestationObject),
       clientDataJson: base64urlEncode(clientDataJSON),
       type: 'public-key',
       authenticatorData: base64urlEncode(authData),
@@ -253,56 +309,61 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
     );
     const clientDataHash = createHash('sha256').update(clientDataJSON).digest();
 
-    // Build fido2-assert input:
-    // Line 1: clientDataHash (hex)
-    // Line 2: relying party id
-    // Optional: credential id (hex) for each allowed credential
-    const inputLines = [clientDataHash.toString('hex'), options.rpId];
-
-    if (options.allowCredentials && options.allowCredentials.length > 0) {
-      for (const cred of options.allowCredentials) {
-        inputLines.push(Buffer.from(base64urlDecode(cred.id)).toString('hex'));
-      }
-    }
-
-    const input = inputLines.join('\n') + '\n';
-
-    const args = ['-G', '-h']; // -G = get assertion
-
     const { uv, pin } = await this.resolveUv(device, options.rpId, options.userVerification);
+    const args = ['-G'];
     if (uv) args.push('-v');
 
-    const { stdout } = await withInputFile(input, (file) =>
-      runTool('fido2-assert', [...args, '-i', file, device], pin, (options.timeout || 60) * 1000),
-    );
+    // fido2-assert(1) takes at most one (non-resident) credential id per run, so try each
+    // allowed credential in turn; no allowCredentials means a resident (discoverable) credential.
+    const allowed = options.allowCredentials?.map((c) => c.id) ?? [];
+    const candidates: Array<string | null> = allowed.length > 0 ? allowed : [null];
+    const timeoutMs = (options.timeout || 60) * 1000;
 
-    // Parse fido2-assert output (base64-encoded lines):
-    // Line 1: authenticator data (base64)
-    // Line 2: signature (base64)
-    // Line 3: credential id (base64, for discoverable creds)
-    // Line 4: user id (base64, for discoverable creds)
-    const lines = stdout.trim().split('\n');
-    if (lines.length < 2) {
-      throw new Error('Unexpected fido2-assert output format');
+    let lastError: unknown = new Error('No matching credential on the security key');
+    for (const credId of candidates) {
+      // INPUT FORMAT (-G): base64 client data hash, rp id, base64 credential id if not resident.
+      const input = [
+        clientDataHash.toString('base64'),
+        options.rpId,
+        ...(credId ? [Buffer.from(base64urlDecode(credId)).toString('base64')] : []),
+      ].join('\n') + '\n';
+
+      let stdout: string;
+      try {
+        ({ stdout } = await withInputFile(input, (file) =>
+          runTool('fido2-assert', [...args, '-i', file, device], pin, timeoutMs),
+        ));
+      } catch (err) {
+        lastError = err;
+        if (/FIDO_ERR_NO_CREDENTIALS/.test(String((err as Error).message))) continue;
+        throw err;
+      }
+
+      // OUTPUT FORMAT: client data hash, rp id, CBOR authenticator data, signature,
+      // user id (resident credentials only).
+      const lines = stdout.trim().split('\n');
+      if (lines.length < 4) {
+        throw new Error('Unexpected fido2-assert output format');
+      }
+
+      const authData = unwrapAuthData(Buffer.from(lines[2], 'base64'), options.rpId);
+      const signature = Buffer.from(lines[3], 'base64');
+      const userHandle = lines.length >= 5 && lines[4]
+        ? base64urlEncode(Buffer.from(lines[4], 'base64'))
+        : null;
+      // shortcut: fido2-assert does not print the credential id for resident credentials; empty then, upgrade via fido2-token -L -k if needed.
+      const credentialId = credId ?? '';
+
+      return {
+        credentialId,
+        rawId: credentialId,
+        authenticatorData: base64urlEncode(authData),
+        clientDataJson: base64urlEncode(clientDataJSON),
+        signature: base64urlEncode(signature),
+        userHandle,
+        type: 'public-key',
+      };
     }
-
-    const authData = Buffer.from(lines[0], 'base64');
-    const signature = Buffer.from(lines[1], 'base64');
-    const credentialId = lines.length >= 3
-      ? base64urlEncode(Buffer.from(lines[2], 'base64'))
-      : options.allowCredentials?.[0]?.id || '';
-    const userHandle = lines.length >= 4
-      ? base64urlEncode(Buffer.from(lines[3], 'base64'))
-      : null;
-
-    return {
-      credentialId,
-      rawId: credentialId,
-      authenticatorData: base64urlEncode(authData),
-      clientDataJson: base64urlEncode(clientDataJSON),
-      signature: base64urlEncode(signature),
-      userHandle,
-      type: 'public-key',
-    };
+    throw lastError;
   }
 }
