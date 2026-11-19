@@ -13,6 +13,7 @@
 
 import { app } from 'electron';
 import { AuthenticatorManager } from './main/authenticator-manager';
+import { showPinDialog } from './main/pin-dialog';
 import { registerWebAuthnHandlers, removeWebAuthnHandlers } from './main/ipc-handlers';
 
 export { setupWebAuthnBridge, getWebAuthnPageScript, webauthnPageScript } from './preload';
@@ -31,6 +32,9 @@ export interface SetupOptions {
 
   /** Enable hardware FIDO2 key support (requires fido2-tools). Default: true. */
   enableHardwareKeys?: boolean;
+
+  /** Custom FIDO2 PIN prompt for hardware keys. Default: built-in Electron dialog. */
+  pinProvider?: (rpId: string) => Promise<string | null>;
 }
 
 let manager: AuthenticatorManager | null = null;
@@ -67,6 +71,12 @@ export async function setupWebAuthn(options?: SetupOptions): Promise<void> {
   manager = new AuthenticatorManager({
     storagePath,
     enableHardwareKeys,
+    pinProvider:
+      options?.pinProvider ??
+      ((rpId) => {
+        const { BrowserWindow } = require('electron') as typeof import('electron');
+        return showPinDialog(BrowserWindow.getFocusedWindow(), rpId);
+      }),
   });
 
   await manager.initialize();
