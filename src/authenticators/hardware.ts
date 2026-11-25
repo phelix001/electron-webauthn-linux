@@ -191,7 +191,8 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
     return { uv: true, pin: pin + '\n' };
   }
 
-  async isAvailable(): Promise<boolean> {
+  /** True if the libfido2 tools are installed (cached; says nothing about a key being plugged in). */
+  async hasTools(): Promise<boolean> {
     if (this.toolsAvailable !== null) return this.toolsAvailable;
 
     const [hasCred, hasAssert, hasToken] = await Promise.all([
@@ -201,12 +202,13 @@ export class HardwareKeyBackend implements AuthenticatorBackend {
     ]);
 
     this.toolsAvailable = hasCred && hasAssert && hasToken;
+    return this.toolsAvailable;
+  }
 
-    if (!this.toolsAvailable) return false;
-
-    // Also check if any devices are connected
-    const devices = await discoverDevices();
-    return devices.length > 0;
+  /** Tools installed AND a key currently plugged in (checked live on every call). */
+  async isAvailable(): Promise<boolean> {
+    if (!(await this.hasTools())) return false;
+    return (await discoverDevices()).length > 0;
   }
 
   async hasCredentials(_rpId: string, _credentialIds?: string[]): Promise<boolean> {

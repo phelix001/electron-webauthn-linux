@@ -165,6 +165,64 @@ export async function showAuthenticatorDialog(
   });
 }
 
+/**
+ * Ask the user to plug in a security key. Resolves true on "Retry", false on cancel/close.
+ */
+export async function showInsertKeyDialog(
+  parentWindow: BrowserWindowType | null,
+): Promise<boolean> {
+  const { BrowserWindow } = require('electron') as typeof import('electron');
+
+  return new Promise<boolean>((resolve) => {
+    const win = new BrowserWindow({
+      width: 400,
+      height: 220,
+      parent: parentWindow || undefined,
+      modal: !!parentWindow,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      title: 'Insert Security Key',
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+      show: false,
+    });
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      body { font-family: sans-serif; padding: 24px; background: #1e1e2e; color: #cdd6f4; user-select: none; }
+      h2 { font-size: 16px; margin-bottom: 12px; } p { font-size: 13px; color: #a6adc8; margin-bottom: 20px; }
+      button { padding: 8px 16px; margin-right: 8px; border: 1px solid #45475a; border-radius: 6px;
+        background: #313244; color: #cdd6f4; cursor: pointer; font-size: 13px; }
+      button:hover { background: #45475a; }
+    </style></head><body>
+      <h2>Insert your security key</h2>
+      <p>No FIDO2 security key was found. Plug it in, then choose Retry.</p>
+      <button id="retry">Retry</button><button id="cancel">Cancel</button>
+      <script>
+        document.getElementById('retry').addEventListener('click', () => { document.title = 'RETRY'; });
+        document.getElementById('cancel').addEventListener('click', () => { document.title = 'CANCELLED'; });
+      </script></body></html>`;
+
+    let result = false;
+    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    win.once('ready-to-show', () => win.show());
+
+    const timer = setInterval(() => {
+      if (win.isDestroyed()) return;
+      const title = win.getTitle();
+      if (title === 'RETRY' || title === 'CANCELLED') {
+        result = title === 'RETRY';
+        win.close();
+      }
+    }, 100);
+
+    // Resolves on every exit path (button, window X, destroy).
+    win.on('closed', () => {
+      clearInterval(timer);
+      resolve(result);
+    });
+  });
+}
+
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')

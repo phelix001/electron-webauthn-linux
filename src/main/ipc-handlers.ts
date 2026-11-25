@@ -6,7 +6,7 @@
 import { ipcMain, BrowserWindow } from 'electron';
 import type { AuthenticatorManager } from './authenticator-manager';
 import type { CreateOptions, GetOptions } from '../authenticators/types';
-import { showAuthenticatorDialog } from './dialog';
+import { showAuthenticatorDialog, showInsertKeyDialog } from './dialog';
 
 /**
  * Register WebAuthn IPC handlers on the main process.
@@ -71,16 +71,21 @@ export function registerWebAuthnHandlers(manager: AuthenticatorManager): void {
         // No backend has matching credentials.
         // Only fall back to hardware backends (which can't report credentials
         // upfront), not software backends that already confirmed they have none.
-        const allBackends = await manager.getAvailableBackendsForCreate();
-        const hardwareBackends = allBackends.filter(
-          (b) => b.type === 'hardware',
-        );
+        const parentWindow = BrowserWindow.fromWebContents(event.sender);
+        let hardwareBackends;
+        for (;;) {
+          const allBackends = await manager.getAvailableBackendsForCreate();
+          hardwareBackends = allBackends.filter((b) => b.type === 'hardware');
+          if (hardwareBackends.length > 0) break;
 
-        if (hardwareBackends.length === 0) {
-          // No hardware keys available and software store is empty - fail fast
-          throw new Error(
-            'NoCredentials: No passkeys found for this site.',
-          );
+          if (!(await manager.hasHardwareSupport())) {
+            // No hardware support and software store is empty - fail fast
+            throw new Error('NoCredentials: No passkeys found for this site.');
+          }
+          // Tools installed but no key plugged in: ask, then re-check.
+          if (!(await showInsertKeyDialog(parentWindow))) {
+            throw new Error('NotAllowed: The operation was cancelled.');
+          }
         }
 
         // Only try hardware backends as a fallback

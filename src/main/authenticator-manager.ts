@@ -37,7 +37,8 @@ export class AuthenticatorManager {
     // Optionally add hardware key backend
     if (this.options.enableHardwareKeys !== false) {
       const hardwareBackend = new HardwareKeyBackend(this.options.pinProvider);
-      if (await hardwareBackend.isAvailable()) {
+      // Register on tools alone: a key may be plugged in later, so presence is checked per call.
+      if (await hardwareBackend.hasTools()) {
         this.backends.push(hardwareBackend);
       }
     }
@@ -51,7 +52,14 @@ export class AuthenticatorManager {
    */
   async getAvailableBackendsForCreate(): Promise<AuthenticatorBackend[]> {
     await this.initialize();
-    return this.backends.filter((b) => b.type === 'software' || b.type === 'hardware');
+    const live = await Promise.all(this.backends.map((b) => b.isAvailable()));
+    return this.backends.filter((_, i) => live[i]);
+  }
+
+  /** True if hardware keys are supported here (tools installed), whether or not a key is plugged in. */
+  async hasHardwareSupport(): Promise<boolean> {
+    await this.initialize();
+    return this.backends.some((b) => b.type === 'hardware');
   }
 
   /**
