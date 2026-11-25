@@ -1,6 +1,6 @@
 {
   "name": "electron-webauthn-linux",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "WebAuthn/passkey support for Electron apps on Linux via passkey-rs native addon",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
