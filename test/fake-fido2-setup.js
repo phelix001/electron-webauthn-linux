@@ -15,7 +15,7 @@ module.exports = async () => {
     writeFileSync(p, `#!/bin/bash\n${body}\n`);
     chmodSync(p, 0o755);
   };
-  script('fido2-token', `[ "$1" = "-L" ] && { echo "/dev/hidraw9: vendor=0x1, product=0x2 (Fake)"; exit 0; }
+  script('fido2-token', `[ "$1" = "-L" ] && { [ -f ${join(dir, 'nodevice')} ] && exit 0; echo "/dev/hidraw9: vendor=0x1, product=0x2 (Fake)"; exit 0; }
 [ "$1" = "-I" ] && { echo "options: rk, up, $(cat ${pinFlag})"; exit 0; }
 exit 1`);
   // libfido2 prints authenticator data CBOR-wrapped: 0x58 <len> <rpIdHash(32) flags(1) counter(4)>.

@@ -4,7 +4,7 @@
  * instead of stdin. Source: man pages shipped with fido2-tools 1.16.
  * Behavioral test: real spawned processes against fake fido2-* scripts on PATH.
  */
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { HardwareKeyBackend } from '../src/authenticators/hardware';
 import { base64urlEncode } from '../src/helpers/serialization';
@@ -89,4 +89,22 @@ test('authenticator data with the wrong rpIdHash is rejected', async () => {
   await expect(
     new HardwareKeyBackend().getAssertion({ ...opts, rpId: 'evil.example' }),
   ).rejects.toThrow(/rpIdHash/);
+});
+
+// Spec: a key plugged in AFTER startup must be usable; with no key the backend
+// reports absence rather than caching it. Source: Ferdium PR #2616 (MurzNN,
+// 2026-11-25): no key -> NoCredentials, login page loops. Lives in this file so it
+// runs serially with the other tests that share the fake fido2-token.
+test('no key: hasTools true, isAvailable false; key inserted later: true', async () => {
+  const noDevice = join(dir, 'nodevice');
+  const b = new HardwareKeyBackend();
+  writeFileSync(noDevice, '');
+  try {
+    expect(await b.hasTools()).toBe(true);
+    expect(await b.isAvailable()).toBe(false);
+    expect(await b.hasCredentials('example.com')).toBe(false);
+  } finally {
+    rmSync(noDevice, { force: true });
+  }
+  expect(await b.isAvailable()).toBe(true);
 });
